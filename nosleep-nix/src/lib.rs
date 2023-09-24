@@ -11,7 +11,7 @@ use snafu::{prelude::*, Backtrace};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("General D-Bus Error"))]
+    #[snafu(display("General D-Bus Error : {}", source))]
     DBus {
         source: dbus::Error,
         backtrace: Backtrace,
@@ -19,6 +19,9 @@ pub enum Error {
 
     #[snafu(display("Invalid response from D-Bus"))]
     InvalidResponse { backtrace: Backtrace },
+
+    #[snafu(display("{}", message))]
+    Simple { message: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -27,7 +30,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 enum DBusAPI {
     GnomeApi,                  // org.gnome.Sessionmanager
     FreeDesktopPowerApi,       // org.freedesktop.PowerMansagement
-    FreeDesktopScreenSaverAPI, // org.freedesktop.ScreenSaver
+    FreeDesktopScreenSaverApi, // org.freedesktop.ScreenSaver
+    XfceApi,                   // org.xfce.ScreenSaver
 }
 
 // Inhibit flags defined in the org.gnome.SessionManager interface.
@@ -99,7 +103,16 @@ impl NoSleep {
         // Try again using the FreeDesktopPowerApi (we need two calls)
         let mut cookies: Vec<NoSleepHandleCookie> = vec![];
         if nosleep_type == NoSleepType::PreventUserIdleDisplaySleep {
-            let cookie = self.inhibit(&DBusAPI::FreeDesktopScreenSaverAPI, &nosleep_type)?;
+            let cookie = if let Ok(cookie) =
+                self.inhibit(&DBusAPI::FreeDesktopScreenSaverApi, &nosleep_type)
+            {
+                cookie
+            } else if let Ok(cookie) = self.inhibit(&DBusAPI::XfceApi, &nosleep_type) {
+                cookie
+            } else {
+                return Err(
+                    Error::Simple{message:"no valid dbus interface found: supports org.gnome.SessionManager, org.xfce.ScreenSaver and org.freedesktop.ScreenSaver".to_owned()});
+            };
             cookies.push(cookie);
         }
         // Prevent suspension
@@ -168,10 +181,17 @@ fn inhibit_msg(api: &DBusAPI, nosleep_type: &NoSleepType) -> dbus::Message {
             "Inhibit",
             ("org.powersaveblocker.app", "Power Save Blocker"),
         ),
-        DBusAPI::FreeDesktopScreenSaverAPI => dbus::Message::call_with_args(
+        DBusAPI::FreeDesktopScreenSaverApi => dbus::Message::call_with_args(
             "org.freedesktop.ScreenSaver",
             "/org/freedesktop/ScreenSaver",
             "org.freedesktop.ScreenSaver",
+            "Inhibit",
+            ("org.powersaveblocker.app", "Power Save Blocker"),
+        ),
+        DBusAPI::XfceApi => dbus::Message::call_with_args(
+            "org.xfce.ScreenSaver",
+            "/org/xfce/ScreenSaver",
+            "org.xfce.ScreenSaver",
             "Inhibit",
             ("org.powersaveblocker.app", "Power Save Blocker"),
         ),
@@ -198,10 +218,17 @@ fn uninhibit_msg(api: &DBusAPI, handle: u32) -> dbus::Message {
             "UnInhibit",
             (handle,),
         ),
-        DBusAPI::FreeDesktopScreenSaverAPI => dbus::Message::call_with_args(
+        DBusAPI::FreeDesktopScreenSaverApi => dbus::Message::call_with_args(
             "org.freedesktop.ScreenSaver",
             "/org/freedesktop/ScreenSaver",
             "org.freedesktop.ScreenSaver",
+            "UnInhibit",
+            (handle,),
+        ),
+        DBusAPI::XfceApi => dbus::Message::call_with_args(
+            "org.xfce.ScreenSaver",
+            "/org/xfce/ScreenSaver",
+            "org.xfce.ScreenSaver",
             "UnInhibit",
             (handle,),
         ),
@@ -248,7 +275,7 @@ mod tests {
     #[test]
     fn test_inhibit_freedesktop_screen_saver_api() {
         let msg = inhibit_msg(
-            &DBusAPI::FreeDesktopScreenSaverAPI,
+            &DBusAPI::FreeDesktopScreenSaverApi,
             &NoSleepType::PreventUserIdleDisplaySleep,
         );
         assert_eq!("/org/freedesktop/ScreenSaver", &*msg.path().unwrap());
@@ -259,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_uninhibit_freedesktop_screen_saver_api() {
-        let msg = uninhibit_msg(&DBusAPI::FreeDesktopScreenSaverAPI, 0);
+        let msg = uninhibit_msg(&DBusAPI::FreeDesktopScreenSaverApi, 0);
         assert_eq!("/org/freedesktop/ScreenSaver", &*msg.path().unwrap());
         assert_eq!("org.freedesktop.ScreenSaver", &*msg.interface().unwrap());
         assert_eq!("UnInhibit", &*msg.member().unwrap());
